@@ -12,25 +12,35 @@ NOTE: audio is not carried through (OpenCV writes video only). If you need the a
 mux it back with ffmpeg afterwards.
 
 Usage:
-  python flat_to_dome_video.py IN.mov OUT.mp4 [--size 2160] [--mode billboard]
-         [--hfov 95] [--elevation 50] [--azimuth 0] [--mirror] [--fps 0]
+  python flat_to_dome_video.py IN.mov [OUT.mp4] [--size 2160] [--mode billboard]
+         [--hfov 95] [--elevation 50] [--azimuth 0] [--copies 1] [--mirror] [--fps 0]
+
+  --copies (billboard mode) repeats the footage on N evenly-spaced sides of the
+  dome: 2 = opposite sides, 4 = four quarters.
+
+Bare input filenames are found in resources/ and outputs/. Bare output filenames
+are written to outputs/masters/. If OUT is omitted, a name is generated there.
 """
 import argparse
 import numpy as np
 import cv2
-from flat_to_dome import billboard_maps, fill_maps
+from flat_to_dome import billboard_copies_maps, fill_maps
+from project_paths import display_path, existing_path, output_path
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("input")
-    ap.add_argument("output")
+    ap.add_argument("output", nargs="?")
     ap.add_argument("--size", type=int, default=2160)
     ap.add_argument("--mode", choices=["billboard", "fill", "disc"], default="billboard")
     ap.add_argument("--hfov", type=float, default=95.0)
     ap.add_argument("--elevation", type=float, default=50.0)
     ap.add_argument("--azimuth", type=float, default=0.0)
+    ap.add_argument("--copies", type=int, default=1,
+                    help="billboard mode: evenly-spaced copies around the dome "
+                         "(1 = single panel, 2 = opposite sides, 4 = four quarters)")
     ap.add_argument("--mirror", action="store_true")
     ap.add_argument("--fps", type=float, default=0.0, help="override output fps (0 = keep source)")
     ap.add_argument("--interp", choices=["linear", "lanczos"], default="linear",
@@ -38,9 +48,13 @@ def main():
     args = ap.parse_args()
     interp = cv2.INTER_LANCZOS4 if args.interp == "lanczos" else cv2.INTER_LINEAR
 
-    cap = cv2.VideoCapture(args.input)
+    input_file = existing_path(args.input)
+    default_output = f"{input_file.stem}_master_{args.size}.mp4"
+    output_file = output_path(args.output or default_output, "masters")
+
+    cap = cv2.VideoCapture(str(input_file))
     if not cap.isOpened():
-        raise SystemExit(f"Could not open video: {args.input}")
+        raise SystemExit(f"Could not open video: {display_path(input_file)}")
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -49,7 +63,8 @@ def main():
 
     # Precompute everything that's frame-independent.
     if args.mode == "billboard":
-        map_x, map_y, valid = billboard_maps(S, w, h, args.hfov, args.elevation, args.azimuth)
+        map_x, map_y, valid = billboard_copies_maps(S, w, h, args.hfov, args.elevation,
+                                                    args.azimuth, args.copies)
     elif args.mode == "fill":
         map_x, map_y, valid = fill_maps(S, w, h)
     else:  # disc: resize + center-crop + circular mask, all constant per frame
@@ -62,7 +77,7 @@ def main():
 
     inv = ~valid
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(args.output, fourcc, fps, (S, S))
+    writer = cv2.VideoWriter(str(output_file), fourcc, fps, (S, S))
 
     idx = 0
     while True:
@@ -85,7 +100,7 @@ def main():
 
     cap.release()
     writer.release()
-    print(f"Wrote {args.output}  ({S}x{S}, {idx} frames, {fps:.2f}fps, mode={args.mode})")
+    print(f"Wrote {display_path(output_file)}  ({S}x{S}, {idx} frames, {fps:.2f}fps, mode={args.mode})")
 
 
 if __name__ == "__main__":

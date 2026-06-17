@@ -17,12 +17,19 @@ Two placement modes:
                          disc (heavy distortion; quick stylistic option).
 
 Usage:
-  python flat_to_dome.py INPUT OUTPUT [--size 2048] [--mode billboard]
-         [--hfov 90] [--elevation 55] [--azimuth 0] [--bg 0,0,0]
+  python flat_to_dome.py INPUT [OUTPUT] [--size 2048] [--mode billboard]
+         [--hfov 90] [--elevation 55] [--azimuth 0] [--copies 1] [--bg 0,0,0]
+
+  --copies (billboard mode) repeats the picture on N evenly-spaced sides of the
+  dome: 2 = opposite sides, 4 = four quarters. 2 usually looks best.
+
+Bare input filenames are found in resources/ and outputs/. Bare output filenames
+are written to outputs/masters/. If OUTPUT is omitted, a name is generated there.
 """
 import argparse
 import numpy as np
 import cv2
+from project_paths import display_path, existing_path, output_path
 
 
 def build_dome_directions(size):
@@ -87,6 +94,29 @@ def billboard_maps(size, img_w, img_h, hfov_deg, elevation_deg, azimuth_deg):
     return map_x, map_y, valid
 
 
+def billboard_copies_maps(size, img_w, img_h, hfov_deg, elevation_deg, azimuth_deg, copies):
+    """Place `copies` evenly-spaced billboards around the dome, merged into one map.
+
+    Copy k points at azimuth (azimuth_deg + k * 360/copies), so 2 copies land on
+    opposite sides of the dome and 4 copies on the four quarters. All copies share
+    the same source image and elevation, so each reads upright toward the zenith.
+    Returns a single (map_x, map_y, valid) usable by one cv2.remap call (image and
+    video alike). Where copies would overlap, the earlier (lower-azimuth) one wins.
+    """
+    copies = max(1, int(copies))
+    map_x = np.full((size, size), -1.0, dtype=np.float32)
+    map_y = np.full((size, size), -1.0, dtype=np.float32)
+    valid = np.zeros((size, size), dtype=bool)
+    for k in range(copies):
+        az = azimuth_deg + k * (360.0 / copies)
+        mx, my, v = billboard_maps(size, img_w, img_h, hfov_deg, elevation_deg, az)
+        take = v & ~valid                          # don't overwrite an earlier copy
+        map_x[take] = mx[take]
+        map_y[take] = my[take]
+        valid |= take
+    return map_x, map_y, valid
+
+
 def disc_fit(img, size):
     """Fit an already-circular all-sky / fisheye image into the SxS dome disc.
 
@@ -129,29 +159,36 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("input")
-    ap.add_argument("output")
+    ap.add_argument("output", nargs="?")
     ap.add_argument("--size", type=int, default=2048, help="output square size (px)")
     ap.add_argument("--mode", choices=["billboard", "fill", "disc"], default="billboard")
     ap.add_argument("--hfov", type=float, default=90.0, help="billboard horizontal FOV (deg)")
     ap.add_argument("--elevation", type=float, default=55.0, help="billboard center elevation above horizon (deg)")
     ap.add_argument("--azimuth", type=float, default=0.0, help="billboard azimuth from front (deg)")
+    ap.add_argument("--copies", type=int, default=1,
+                    help="billboard mode: number of evenly-spaced copies around the dome "
+                         "(1 = single panel, 2 = opposite sides, 4 = four quarters)")
     ap.add_argument("--bg", default="0,0,0", help="background RGB outside content, e.g. 0,0,0")
     ap.add_argument("--mirror", action="store_true",
                     help="horizontally flip the master (East-West swap) so text/graphics "
                          "read correctly for an audience looking up; verify against your projector")
     args = ap.parse_args()
 
-    img = cv2.imread(args.input, cv2.IMREAD_COLOR)
+    input_file = existing_path(args.input)
+    default_output = f"{input_file.stem}_master_{args.size}.png"
+    output_file = output_path(args.output or default_output, "masters")
+
+    img = cv2.imread(str(input_file), cv2.IMREAD_COLOR)
     if img is None:
-        raise SystemExit(f"Could not read image: {args.input}")
+        raise SystemExit(f"Could not read image: {display_path(input_file)}")
     h, w = img.shape[:2]
 
     if args.mode == "disc":
         out, valid = disc_fit(img, args.size)
     else:
         if args.mode == "billboard":
-            map_x, map_y, valid = billboard_maps(args.size, w, h,
-                                                 args.hfov, args.elevation, args.azimuth)
+            map_x, map_y, valid = billboard_copies_maps(args.size, w, h, args.hfov,
+                                                        args.elevation, args.azimuth, args.copies)
         else:
             map_x, map_y, valid = fill_maps(args.size, w, h)
         out = cv2.remap(img, map_x, map_y, interpolation=cv2.INTER_LANCZOS4,
@@ -162,8 +199,8 @@ def main():
     if args.mirror:
         out = out[:, ::-1]
 
-    cv2.imwrite(args.output, out)
-    print(f"Wrote {args.output}  ({args.size}x{args.size}, mode={args.mode})")
+    cv2.imwrite(str(output_file), out)
+    print(f"Wrote {display_path(output_file)}  ({args.size}x{args.size}, mode={args.mode})")
 
 
 if __name__ == "__main__":
