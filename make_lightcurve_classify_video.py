@@ -18,10 +18,10 @@ verdict colour. Decided curves keep a small mark for the rest of the clip.
 NOTE: video only (no audio).
 
 Usage:
-  python make_lightcurve_classify_video.py [OUT.mp4] [--size 1440] [--count 200]
+  python make_lightcurve_classify_video.py [OUT.mp4] [--size 2160] [--count 200]
          [--seed 7] [--examples 8] [--planet-prob 0.4] [--sec-per-example 1.0]
          [--fps 30] [--intro 1.0] [--outro 1.5] [--ang-size 8] [--max-tilt 22]
-         [--background resources/tess/TESS_north_hires_azeq_no_labels_4K.jpg]
+         [--background resources/tess/TESS_north_hires_azeq_no_labels_4K.jpg] [--poster]
 
 Bare filenames resolve through resources/ + outputs/; bare output is written to
 outputs/videos/. If OUT is omitted, a name is generated there.
@@ -205,7 +205,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("output", nargs="?")
-    ap.add_argument("--size", type=int, default=1440)
+    ap.add_argument("--size", type=int, default=2160)
     ap.add_argument("--count", type=int, default=200)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--examples", type=int, default=8, help="how many curves get classified")
@@ -218,6 +218,9 @@ def main():
     ap.add_argument("--max-tilt", type=float, default=22.0)
     ap.add_argument("--background", help="azimuthal-equidistant (dome/fisheye) sky image; curves "
                                          "are placed only where it has coverage")
+    ap.add_argument("--poster", action="store_true",
+                    help="also write a still PNG of the field with NO robot/boxes/marks "
+                         "(the video's opening frame minus the robot) — for a slide before play")
     args = ap.parse_args()
 
     S = args.size - (args.size % 2)            # even dims for the encoder
@@ -233,7 +236,7 @@ def main():
 
     rng = np.random.default_rng(args.seed)
     R = S / 2.0
-    pad_px = int(np.ceil((args.ang_size / 90.0) * R * 0.7))   # curve half-extent, in px
+    pad_px = max(3, int(round(S / 300)))     # small margin only — keep the footprint's outer spokes
     cov = coverage_mask(S, bg_fit, pad_px)
     field, curves = build_field(S, args.count, rng, args, bg_fit, cov)
 
@@ -246,6 +249,13 @@ def main():
     j, i = np.meshgrid(np.arange(S), np.arange(S), indexing="xy")
     disc_inv = np.hypot(j - cx, i - cy) > R
 
+    if args.poster:                              # field with no robot/marks — matches the video exactly
+        poster = field.copy()
+        poster[disc_inv] = 0
+        poster_file = output_file.with_name(output_file.stem + "_poster.png")
+        cv2.imwrite(str(poster_file), poster)
+        print(f"Wrote {display_path(poster_file)}  (poster still, no robot)")
+
     fpe = max(1, round(args.sec_per_example * args.fps))
     box_frames = max(1, round(fpe * 0.4))      # examining beat, then verdict
     box_pad = max(6, int(S / 180))
@@ -254,8 +264,14 @@ def main():
     small_sz = 0.045 * S
     small_th = max(2, int(S / 600))
 
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(output_file), fourcc, args.fps, (S, S))
+    codec, writer = None, None
+    for cc in ("avc1", "mp4v"):              # prefer H.264 (far crisper lines); fall back to MPEG-4
+        writer = cv2.VideoWriter(str(output_file), cv2.VideoWriter_fourcc(*cc), args.fps, (S, S))
+        if writer.isOpened():
+            codec = cc
+            break
+    if not writer or not writer.isOpened():
+        raise SystemExit("Could not open a video writer for the output file")
 
     def write(img):
         f = img.copy()
@@ -322,7 +338,7 @@ def main():
     writer.release()
     n_planet = sum(verdicts)
     total = round(args.intro * args.fps) + len(ex_idx) * fpe + round(args.outro * args.fps)
-    print(f"Wrote {display_path(output_file)}  ({S}x{S}, {total} frames @ {args.fps:g}fps, "
+    print(f"Wrote {display_path(output_file)}  ({S}x{S}, {total} frames @ {args.fps:g}fps, {codec}, "
           f"{len(ex_idx)} classified: {n_planet} planet / {len(ex_idx) - n_planet} not)")
 
 
